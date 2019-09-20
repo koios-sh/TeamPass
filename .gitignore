@@ -8,3 +8,4 @@ install1/
 backups/*.sql
 includes/libraries/Email/Phpmailer_/*
 includes/libraries/Authentication/Yubico/php-yubico-master/*
+**/*.DS_Store

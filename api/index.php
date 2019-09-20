@@ -42,10 +42,10 @@ switch ($method) {
         restGet();
         break;
     case 'PUT':
-        restPut();
+        restError('NOT SUPPORT');
         break;
     case 'DELETE':
-        restDelete();
+        restError('NOT SUPPORT');
         break;
     case 'HEAD':
         restHead();
