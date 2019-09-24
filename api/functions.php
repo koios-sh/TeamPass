@@ -141,7 +141,7 @@ function teampassGetKeys()
  */
 function restHead()
 {
-    header('HTTP/1.1 402 Payment Required');
+    restOk(array());
 }
 
 /**
@@ -249,9 +249,7 @@ function getGivenUserFolderIds($api_user) {
         );
         foreach ($response as $data) {
             $folder_id = $data['folder_id'];
-            if (!array_key_exists($folder_id, $folder_arr)) {
-                array_push($folder_arr, $folder_id);
-            }
+            array_push($folder_arr, $folder_id);
         }
     }
     # get current user's folder id
@@ -264,9 +262,7 @@ function getGivenUserFolderIds($api_user) {
         );
         foreach ($response as $data) {
             $folder_id = $data['id'];
-            if (!array_key_exists($folder_id, $folder_arr)) {
-                array_push($folder_arr, $folder_id);
-            }
+            array_push($folder_arr, $folder_id);
         }
     }
     return $folder_arr;
@@ -303,11 +299,7 @@ function insertOrUpdateItem($itemJson, $api_user) {
         if (strlen($item_pwd) > 50) {
             restError('PASSWORDTOOLONG');
         }
-        // Check Folder ID
-        $folder_response = DB::queryFirstRow("SELECT * FROM " . prefix_table("nested_tree") . " WHERE id = %i", $item_folder_id);
-        if (count($folder_response) == 0) {
-            restError('NOSUCHFOLDER');
-        }
+        
         // insert, check if element doesn't already exist
         if ($item_id == 0)  {
             $item_duplicate_allowed = getSettingValue("duplicate_item");
@@ -341,20 +333,58 @@ function insertOrUpdateItem($itemJson, $api_user) {
             if (!is_numeric($item_id)) {
                 return restError('NO_ITEM');
             }
-            DB::query(
+            $response = DB::queryFirstRow(
                 "SELECT *
                     FROM " . prefix_table("items") . "
                     WHERE id = %i",
                 $item_id
             );
-            $counter = DB::count();
-            if ($counter == 0) {
+            if (count($response) == 0) {
                 return restError('NO_DATA_EXIST');
+            }
+
+            $item_folder_id = $response['id_tree'];
+        }
+
+        // Check Folder ID
+        $folder_response = DB::queryFirstRow("SELECT * FROM " . prefix_table("nested_tree") . " WHERE id = %i", $item_folder_id);
+        if (count($folder_response) == 0) {
+            restError('NOSUCHFOLDER');
+        }
+
+        // Check permission
+        $canInsert = false;
+        $canUpdate = false;
+        foreach (explode(';', $api_user['fonction_id']) as $role) {
+            if (empty($role) === false) {
+                $access = DB::queryFirstRow(
+                    "SELECT type FROM " . prefix_table("roles_values") . " WHERE role_id = %i AND folder_id = %i",
+                    $role,
+                    $item_folder_id
+                );
+                if ($access['type'] === "R") {
+                    $canInsert = $canInsert || false;
+                    $canUpdate = $canUpdate || false;
+                } elseif ($access['type'] === "W") {
+                    $canInsert = $canInsert || true;
+                    $canUpdate = $canUpdate || true;
+                } elseif ($access['type'] === "ND") {
+                    $canInsert = $canInsert || true;
+                    $canUpdate = $canUpdate || true;
+                } elseif ($access['type'] === "NE") {
+                    $canInsert = $canInsert || true;
+                    $canUpdate = $canUpdate || false;
+                } else if ($access['type'] === "NDNE") {
+                    $canInsert = $canInsert || true;
+                    $canUpdate = $canUpdate || false;
+                }
             }
         }
 
         // check if folder_id is personal folder
         if ($folder_response['personal_folder'] == '1') {
+            $canInsert = true;
+            $canUpdate = true;
             // check if folder_id belongs to current user
             if ($folder_response['title'] != $api_user['id']) {
                 return restError('FOLDER IS NOT BELONG TO YOU.');
@@ -388,6 +418,10 @@ function insertOrUpdateItem($itemJson, $api_user) {
     
         try {
             if ($item_id == 0) {
+                // check if have insert permission
+                if (!$canInsert) {
+                    return restError('NO PERMISSION');
+                }
                 // insert
                 DB::insert(
                     prefix_table("items"),
@@ -439,6 +473,10 @@ function insertOrUpdateItem($itemJson, $api_user) {
                     )
                 );
             } else {
+                // check if have update permission
+                if (!$canUpdate) {
+                    return restError('NO PERMISSION');
+                }
                 // update
                 DB::update(
                     prefix_table("items"),
@@ -495,13 +533,55 @@ function insertOrUpdateItem($itemJson, $api_user) {
                 }
             }
 
-            echo '{"status":"item added/updated" , "item_id" : "' . $item_id . '"}';
+            restOk(array("status" => "item added/updated", "item_id" => $item_id));
         } catch (Exception $ex) {
-            echo '<br />' . $ex->getMessage();
+            restError('', $ex->getMessage());
         }
     } else {
         return restError('ITEMMISSINGDATA');
     }
+}
+
+function queryGivenUserRole($api_user) {
+    $role_str = $api_user['fonction_id'];
+
+    $roles = explode(";", $role_str);
+    $role_array = array();
+    # get role's folder id
+    foreach ($roles as $role) {
+        $response = DB::queryFirstRow(
+            "SELECT title
+                FROM " . prefix_table("roles_title") . "
+                WHERE id = %i",
+            $role
+        );
+        array_push($role_array, $response['title']);
+    }
+    return join(",", $role_array);
+}
+
+/**
+ * Generates a random key
+ *
+ * @return void
+ */
+function generateRandomKey($length)
+{
+    // load passwordLib library
+    $path = '../includes/libraries/PasswordGenerator/Generator/';
+    include_once $path . 'ComputerPasswordGenerator.php';
+
+    $generator = new PasswordGenerator\Generator\ComputerPasswordGenerator();
+
+    $generator->setLength($length);
+    $generator->setSymbols(false);
+    $generator->setLowercase(true);
+    $generator->setUppercase(true);
+    $generator->setNumbers(true);
+
+    $key = $generator->generatePasswords();
+
+    return $key[0];
 }
 
 /**
@@ -557,7 +637,7 @@ function restGet()
         );
 
         $api_user = DB::queryFirstRow(
-            "SELECT id, fonction_id, encrypted_psk, name, personal_folder
+            "SELECT id, fonction_id, encrypted_psk, lastname, name, personal_folder
                     FROM " . prefix_table("users") . "
                     WHERE user_api_key = %s",
             $GLOBALS['apikey']
@@ -567,6 +647,8 @@ function restGet()
             restError('USER_NOT_EXISTS');
         }
 
+        $api_user['roles'] = queryGivenUserRole($api_user);
+
         // Load config
         if (file_exists('../includes/config/tp.config.php')) {
             include_once '../includes/config/tp.config.php';
@@ -575,7 +657,21 @@ function restGet()
         }
 
         if ($GLOBALS['request'][0] == "read") {
-            if ($GLOBALS['request'][1] == "mypws") {
+            if ($GLOBALS['request'][1] == 'whoami') {
+                $payload = $api_user;
+                if (isset($_GET['saltkey'])) {
+                    $user_saltkey = defuse_validate_personal_key(
+                        $_GET['saltkey'],
+                        $api_user['encrypted_psk']
+                    );
+                    if (strpos($user_saltkey, "Error ") !== false) {
+                        $payload['saltkey'] = false;
+                    } else {
+                        $payload['saltkey'] = true;
+                    }
+                }
+                restOk($payload);
+            } elseif ($GLOBALS['request'][1] == "mypws") {
                 /*
                 * READ API USER ITEMS
                 */
@@ -643,16 +739,16 @@ function restGet()
                         } else {
                             $crypt_pw['string'] = "Missing personal saltkey. Can't decrypt password.";
                         }
-                        $path = $api_user['name']."(Personal)";
+                        $path = $api_user['lastname'].$api_user['name']."(Personal)";
                     } else {
                         $crypt_pw = cryption($data['pw'], "", "decrypt");
                     }
-                    $json[$data['id']]['pw'] = $crypt_pw['string'];
+                    $json[$data['id']]['password'] = $crypt_pw['string'];
                     $json[$data['id']]['folder_id'] = $data['id_tree'];
                     $json[$data['id']]['path'] = $path;
                 }
                 if (isset($json) && $json) {
-                    echo json_encode($json);
+                    restOk($json);
                 } else {
                     restError('EMPTY');
                 }
@@ -668,22 +764,30 @@ function restGet()
                                 WHERE id IN %ls",
                     array_filter($folder_arr)
                 );
+                $result = array();
                 foreach ($response as $data) {
-                    $json[$data['id']]['id'] = $data['id'];
+                    $json = array();
+                    $json['id'] = $data['id'];
                     if ($data['personal_folder'] == '1') {
-                        $json[$data['id']]['title'] = $api_user['name'] . "(Personal)";
+                        $json['title'] = $api_user['lastname'].$api_user['name']."(Personal)";
                     } else {
-                        $json[$data['id']]['title'] = $data['title'];
+                        $json['title'] = $data['title'];
                     }
-                    $json[$data['id']]['level'] = $data['nlevel'];
-                    $json[$data['id']]['parent_id'] = $data['parent_id'];
+                    $json['level'] = $data['nlevel'];
+                    $json['parent_id'] = $data['parent_id'];
+                    array_push($result, $json);
                 }
-                if (isset($json) && $json) {
-                    echo json_encode($json);
+                if (isset($result) && $result) {
+                    restOk($result);
                 } else {
                     restError('EMPTY');
                 }
-            } 
+            } elseif ($GLOBALS['request'][1] == "generate") {
+                $body = $GLOBALS['body'];
+                $entropy = isset($body['length']) && is_numeric($body['length']) ? (int) $body['length'] : 20;
+                $password = generateRandomKey($entropy);
+                return restOk(array('password' => $password, 'entropy' => $entropy));
+            }
         } elseif ($GLOBALS['request'][0] == "find") {
             if ($GLOBALS['request'][1] == "item") {
                 /*
@@ -695,10 +799,12 @@ function restGet()
                 $tree = new SplClassLoader('Tree\NestedTree', '../includes/libraries');
                 $tree->register();
                 $tree = new Tree\NestedTree\NestedTree(prefix_table("nested_tree"), 'id', 'parent_id', 'title');
-                
-                $item = ""; 
-                if (isset($_GET['keyword'])) {
-                    $item = $_GET['keyword'];
+
+                $body = $GLOBALS['body'];
+                $keyword = isset($body['keyword']) ? $body['keyword'] : ""; 
+                $url = isset($body['url']) ? $body['url'] : ""; 
+                if ($keyword == "" && $url == "") {
+                    return restError("ARGUMENT MISSING", "查询参数keyword或者url必须有一个");
                 }
                 $folder_arr = getGivenUserFolderIds($api_user);
 
@@ -706,14 +812,14 @@ function restGet()
                     "SELECT id, label, login, pw, pw_iv, url, id_tree, description, email
                     FROM ".prefix_table("items")."
                     WHERE
-                    inactif = %i
+                    inactif = 0
                     AND id_tree IN %ls
-                    AND (label LIKE %ss OR description LIKE %ss OR url LIKE %ss)",
-                    "0",
+                    AND (label LIKE %ss OR description LIKE %ss OR login LIKE %ss) AND url LIKE %ss",
                     $folder_arr,
-                    $item,
-                    $item,
-                    $item
+                    $keyword,
+                    $keyword,
+                    $keyword,
+                    $url
                 );
                 $inc = 0;
                 foreach ($response as $data) {
@@ -753,7 +859,7 @@ function restGet()
                     } else {
                         $crypt_pw = cryption($data['pw'], "", "decrypt");
                     }
-                    $json[$inc]['pw'] = $crypt_pw['string'];
+                    $json[$inc]['password'] = $crypt_pw['string'];
                     $json[$inc]['folder_id'] = $data['id_tree'];
                     $json[$inc]['path'] = $path;
                     $json[$inc]['status'] = utf8_encode("OK");
@@ -761,7 +867,7 @@ function restGet()
                     $inc++;
                 }
                 if (isset($json) && $json) {
-                    echo json_encode($json);
+                    restOk($json);
                 } else {
                     restError('EMPTY');
                 }
@@ -786,6 +892,13 @@ function restGet()
     }
 }
 
+function restOk($jsonResult) {
+    $message['error_code'] = 0;
+    $message['data'] = $jsonResult;
+    $message['success'] = true;
+    echo json_encode($message);
+    exit(0);
+}
 /**
  * Return correct error message
  *
@@ -795,129 +908,134 @@ function restGet()
  */
 function restError($type, $detail = 'N/A')
 {
+    $error_code = 500;
     switch ($type) {
         case 'APIKEY':
-            $message = array('err' => 'This api_key '.$GLOBALS['apikey'].' doesn\'t exist', 'code' => 'API_KEY_NOT_FOUND');
+            $message = array('message' => 'This api_key '.$GLOBALS['apikey'].' doesn\'t exist');
             header('HTTP/1.1 405 Method Not Allowed');
             break;
         case 'NO_CATEGORY':
-            $message = array('err' => 'No folder specified');
+            $message = array('message' => 'No folder specified');
             break;
         case 'NO_ITEM':
-            $message = array('err' => 'No item specified');
+            $message = array('message' => 'No item specified');
             break;
         case 'EMPTY':
-            $message = array('err' => 'No results');
+            $error_code = 0;
+            $message = array('message' => 'No results');
             break;
         case 'IPWHITELIST':
-            $message = array('err' => 'Ip address not allowed.');
+            $message = array('message' => 'Ip address not allowed.');
             header('HTTP/1.1 405 Method Not Allowed');
             break;
         case 'MYSQLERR':
-            $message = array('err' => $detail);
+            $message = array('message' => $detail);
             header('HTTP/1.1 500 Internal Server Error');
             break;
         case 'METHOD':
-            $message = array('err' => 'Method not authorized', 'code' => 'METHOD_NOT_AUTHORIZED');
+            $message = array('message' => 'Method not authorized', 'code' => 'METHOD_NOT_AUTHORIZED');
             header('HTTP/1.1 405 Method Not Allowed');
             break;
         case 'ITEMBADDEFINITION':
-            $message = array('err' => 'Item definition not complete');
+            $message = array('message' => 'Item definition not complete');
             header('HTTP/1.1 405 Method Not Allowed');
             break;
         case 'ITEM_MALFORMED':
-            $message = array('err' => 'Item definition not numeric');
+            $message = array('message' => 'Item definition not numeric');
             header('HTTP/1.1 405 Method Not Allowed');
             break;
         case 'USERBADDEFINITION':
-            $message = array('err' => 'User definition not complete');
+            $message = array('message' => 'User definition not complete');
             header('HTTP/1.1 405 Method Not Allowed');
             break;
         case 'USERLOGINEMPTY':
-            $message = array('err' => 'Empty Login given');
+            $message = array('message' => 'Empty Login given');
             header('HTTP/1.1 405 Method Not Allowed');
             break;
         case 'USERALREADYEXISTS':
-            $message = array('err' => 'User already exists');
+            $message = array('message' => 'User already exists');
             header('HTTP/1.1 405 Method Not Allowed');
             break;
         case 'REQUEST_SENT_NOT_UNDERSTANDABLE':
-            $message = array('err' => 'URL format is not following requirements');
+            $message = array('message' => 'URL format is not following requirements');
             break;
         case 'AUTH_NOT_GRANTED':
-            $message = array('err' => 'Bad credentials for user', 'code' => 'AUTH_NOT_GRANTED');
+            $message = array('message' => 'Bad credentials for user', 'code' => 'AUTH_NOT_GRANTED');
             header('HTTP/1.1 404 Error');
             break;
         case 'AUTH_NO_URL':
-            $message = array('err' => 'URL needed to grant access');
+            $message = array('message' => 'URL needed to grant access');
             break;
         case 'AUTH_NO_IDENTIFIER':
-            $message = array('err' => 'Credentials needed to grant access', 'code' => 'AUTH_NO_IDENTIFIER');
+            $message = array('message' => 'Credentials needed to grant access', 'code' => 'AUTH_NO_IDENTIFIER');
             break;
         case 'AUTH_NO_DATA':
-            $message = array('err' => 'Data not allowed for the user', 'code' => 'AUTH_NO_DATA');
+            $message = array('message' => 'Data not allowed for the user', 'code' => 'AUTH_NO_DATA');
             break;
         case 'AUTH_PSK_ERROR':
-            $message = array('err' => 'Personal Saltkey is wrong', 'code' => 'AUTH_PSK_ERROR');
+            $message = array('message' => 'Personal Saltkey is wrong', 'code' => 'AUTH_PSK_ERROR');
             header('HTTP/1.1 404 Error');
             break;
         case 'NO_DATA_EXIST':
-            $message = array('err' => 'No data exists', 'code' => 'NO_DATA_EXIST');
+            $message = array('message' => 'No data exists', 'code' => 'NO_DATA_EXIST');
             break;
         case 'NO_DESTINATION_FOLDER':
-            $message = array('err' => 'No destination folder provided');
+            $message = array('message' => 'No destination folder provided');
             break;
         case 'PASSWORDTOOLONG':
-            $message = array('err' => 'Password is too long');
+            $message = array('message' => 'Password is too long');
             break;
         case 'NOSUCHFOLDER':
-            $message = array('err' => 'Folder ID does not exist');
+            $message = array('message' => 'Folder ID does not exist');
             break;
         case 'PASSWORDEMPTY':
-            $message = array('err' => 'Password is empty');
+            $message = array('message' => 'Password is empty');
             break;
         case 'ITEMEXISTS':
-            $message = array('err' => 'Label already exists');
+            $message = array('message' => 'Label already exists');
             break;
         case 'ITEMMISSINGDATA':
-            $message = array('err' => 'Label or Password or Folder ID is missing');
+            $message = array('message' => 'Label or Password or Folder ID is missing');
             break;
         case 'SET_NO_DATA':
-            $message = array('err' => 'No data to be stored');
+            $message = array('message' => 'No data to be stored');
             break;
         case 'NO_PF_EXIST_FOR_USER':
-            $message = array('err' => 'No Personal Folder exists for this user');
+            $message = array('message' => 'No Personal Folder exists for this user');
             break;
         case 'HTML_CODES_NOT_ALLOWED':
-            $message = array('err' => 'HTML tags not allowed');
+            $message = array('message' => 'HTML tags not allowed');
             break;
         case 'TITLE_ONLY_WITH_NUMBERS':
-            $message = array('err' => 'Title only with numbers not allowed');
+            $message = array('message' => 'Title only with numbers not allowed');
             break;
         case 'ALREADY_EXISTS':
-            $message = array('err' => 'Data already exists');
+            $message = array('message' => 'Data already exists');
             break;
         case 'COMPLEXICITY_LEVEL_NOT_REACHED':
-            $message = array('err' => 'complexity level was not reached');
+            $message = array('message' => 'complexity level was not reached');
             break;
         case 'NO_PARAMETERS':
-            $message = array('err' => 'No parameters given');
+            $message = array('message' => 'No parameters given');
             break;
         case 'USER_NOT_EXISTS':
-            $message = array('err' => 'User does not exist');
+            $message = array('message' => 'User does not exist');
             break;
         case 'NO_PSALTK_PROVIDED':
-            $message = array('err' => 'No Personal saltkey provided');
+            $message = array('message' => 'No Personal saltkey provided');
             break;
         case 'EXPECTED_PARAMETER_NOT_PROVIDED':
-            $message = array('err' => 'Provided parameters are not correct');
+            $message = array('message' => 'Provided parameters are not correct');
             break;
         default:
-            $message = array('err' => $type);
+            $message = array('message' => $type . ' ' . $detail);
             header('HTTP/1.1 500 Internal Server Error');
             break;
     }
 
+    $message['error_code'] = $error_code;
+    $message['data'] = array();
+    $message['success'] = false;
     echo json_encode($message);
     exit(0);
 }
